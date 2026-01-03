@@ -7,11 +7,42 @@ from gtts import gTTS
 from io import BytesIO
 import json
 
+# --- 1. ตั้งค่าหน้าเว็บ + กันจอขาว (Google Translate Bug) ---
 st.set_page_config(page_title="ระบบจัดการร้าน", page_icon="📢", layout="wide")
 
-# ==========================================
-# --- เตรียมระบบเสียง (แบบเล่นซ้ำได้) ---
-# ==========================================
+st.markdown("""
+    <meta name="google" content="notranslate">
+    <style>
+        .VIpgJd-ZVi9od-ORHb-OEVmcd { display: none !important; }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- 2. ฟังก์ชันเชื่อมต่อ Database (รองรับ Cloud) ---
+@st.cache_resource
+def init_connection():
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    
+    # เช็คว่ารันบน Cloud หรือ คอมตัวเอง
+    if 'gcp_service_account' in st.secrets:
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    else:
+        creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+    
+    client = gspread.authorize(creds)
+    return client
+
+try:
+    client = init_connection()
+    sh = client.open("ShabuDB")
+    sheet_orders = sh.sheet1
+    sheet_menu = sh.worksheet("Menu")
+    sheet_history = sh.worksheet("History")
+except Exception as e:
+    st.error(f"เชื่อมต่อ Database ไม่ได้: {e}")
+    st.stop()
+
+# --- ระบบเสียง (แบบเล่นซ้ำได้) ---
 if 'last_sound' not in st.session_state:
     st.session_state.last_sound = None
 if 'last_msg' not in st.session_state:
@@ -27,36 +58,9 @@ def make_sound(text):
         st.error(f"Sound Error: {e}")
         return None
 
-# --- เชื่อมต่อ Google Sheets ---
-@st.cache_resource
-def init_connection():
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    
-    # 1. ลองเช็คว่ามี Secret ของระบบ Cloud ไหม?
-    if 'gcp_service_account' in st.secrets:
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    # 2. ถ้าไม่มี (แปลว่ารันในคอมตัวเอง) ให้หาไฟล์ credentials.json
-    else:
-        creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
-    
-    client = gspread.authorize(creds)
-    return client
-
-try:
-    client = init_connection()
-    sh = client.open("ShabuDB")
-    sheet_orders = sh.sheet1
-    sheet_menu = sh.worksheet("Menu")
-    sheet_history = sh.worksheet("History")
-except:
-    st.error("เชื่อมต่อ Database ไม่ได้")
-    st.stop()
-
-# --- เริ่มระบบหน้าจอ ---
+# --- ส่วน Login ---
 st.title("📢 ระบบจัดการร้าน (Admin)")
 
-# Login
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 
@@ -76,20 +80,21 @@ if st.button("ออกจากระบบ"):
 
 st.divider()
 
-# ==================================================
-# 🔊 ส่วนแสดงแถบเล่นเสียง (อยู่บนสุดเพื่อให้เห็นชัด)
-# ==================================================
+# --- แถบเล่นเสียง (อยู่บนสุด) ---
 if st.session_state.last_sound:
     st.info(f"🔊 ประกาศล่าสุด: {st.session_state.last_msg}")
-    # แสดงแถบเสียง (กดฟังซ้ำได้ตลอดจนกว่าจะมีประกาศใหม่)
     st.audio(st.session_state.last_sound, format='audio/mp3')
 
+# --- Tabs ทำงาน ---
 tab1, tab2 = st.tabs(["📋 จัดการออเดอร์", "✏️ แก้ไขเมนู"])
 
 # === TAB 1: ออเดอร์ ===
 with tab1:
     st.header("รายการออเดอร์")
-    data = sheet_orders.get_all_records()
+    try:
+        data = sheet_orders.get_all_records()
+    except:
+        data = []
     
     if data:
         st.dataframe(pd.DataFrame(data), use_container_width=True)
@@ -105,17 +110,16 @@ with tab1:
                 options = [f"คิว {d['QueueID']} ({d['Name']})" for d in pending]
                 q_select = st.selectbox("เลือกคิวที่ทำเสร็จ:", options)
                 
-                # ปุ่มกดเรียกคิว
                 if st.button("อาหารเสร็จแล้ว (ประกาศ) 🔊", type="primary"):
                     q_id = int(q_select.split(" ")[1])
                     q_name = q_select.split("(")[1].replace(")", "")
                     
                     try:
-                        # 1. อัปเดต Excel
+                        # อัปเดต Excel
                         cell = sheet_orders.find(str(q_id), in_column=1)
                         sheet_orders.update_cell(cell.row, 7, "เสร็จแล้ว")
                         
-                        # 2. สร้างเสียงเก็บไว้ใน Session State
+                        # สร้างเสียง
                         msg = f"ขอเชิญคิวที่ {q_id} คุณ {q_name} ค่ะ อาหารได้แล้วค่ะ"
                         sound_data = make_sound(msg)
                         
@@ -125,7 +129,7 @@ with tab1:
                         
                         st.success(f"อัปเดตคิว {q_id} เรียบร้อย!")
                         time.sleep(1)
-                        st.rerun() # รีเฟรชหน้าจอ (แต่เสียงจะยังอยู่ข้างบน)
+                        st.rerun()
                         
                     except Exception as e:
                         st.error(f"เกิดข้อผิดพลาด: {e}")
@@ -148,7 +152,11 @@ with tab1:
 # === TAB 2: แก้ไขเมนู ===
 with tab2:
     st.header("จัดการเมนู")
-    current_menu = sheet_menu.get_all_records()
+    try:
+        current_menu = sheet_menu.get_all_records()
+    except:
+        current_menu = []
+        
     st.dataframe(pd.DataFrame(current_menu), use_container_width=True)
     
     c1, c2 = st.columns(2)
@@ -162,9 +170,10 @@ with tab2:
                 sheet_menu.append_row([n, p, i, c])
                 st.rerun()
     with c2:
-        items = [r['Item'] for r in current_menu]
-        d = st.selectbox("ลบเมนู", items)
-        if st.button("ลบ"):
-            cell = sheet_menu.find(d, in_column=1)
-            sheet_menu.delete_rows(cell.row)
-            st.rerun()
+        if current_menu:
+            items = [r['Item'] for r in current_menu]
+            d = st.selectbox("ลบเมนู", items)
+            if st.button("ลบ"):
+                cell = sheet_menu.find(d, in_column=1)
+                sheet_menu.delete_rows(cell.row)
+                st.rerun()
